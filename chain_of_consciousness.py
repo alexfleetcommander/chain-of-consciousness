@@ -9,13 +9,16 @@ Usage:
   python3 chain_of_consciousness.py --init          # Create genesis block
   python3 chain_of_consciousness.py --add --event-type boot --data "Session started, cycle 1"
   python3 chain_of_consciousness.py --add --event-type learn --data "Promoted 6 knowledge files"
-  python3 chain_of_consciousness.py --add --event-type decide --data "Triggered Charlie for bounty research"
-  python3 chain_of_consciousness.py --add --event-type milestone --data "190 knowledge files reached"
-  python3 chain_of_consciousness.py --verify         # Verify full chain integrity
+  python3 chain_of_consciousness.py --add --event-type session_end --data "Session ending" --commitment "expected_state_hash"
+  python3 chain_of_consciousness.py --add --event-type session_start --data "Session starting" --verification "actual_state_hash" --expected "previous_commitment_hash"
+  python3 chain_of_consciousness.py --verify         # Verify full chain integrity (human-readable report)
+  python3 chain_of_consciousness.py --verify --json  # Verify full chain integrity (JSON report)
   python3 chain_of_consciousness.py --status          # Show chain stats
   python3 chain_of_consciousness.py --tail N          # Show last N entries
 
-Event types: genesis, boot, learn, decide, create, milestone, rotate, anchor, error, note
+Event types (Layer 1 Core):
+  genesis, boot, learn, decide, create, milestone, rotate, anchor, error, note,
+  session_start, session_end, compaction, governance
 """
 
 import argparse
@@ -29,9 +32,12 @@ CHAIN_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 CHAIN_FILE = os.path.join(CHAIN_DIR, "chain.jsonl")
 META_FILE = os.path.join(CHAIN_DIR, "chain_meta.json")
 
+SCHEMA_VERSION = "1.1"
+
 VALID_EVENT_TYPES = [
     "genesis", "boot", "learn", "decide", "create",
-    "milestone", "rotate", "anchor", "error", "note"
+    "milestone", "rotate", "anchor", "error", "note",
+    "session_start", "session_end", "compaction", "governance"
 ]
 
 
@@ -39,13 +45,16 @@ def sha256(data: str) -> str:
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
-def make_entry(sequence: int, event_type: str, data: str, prev_hash: str, agent: str = "alex") -> dict:
+def make_entry(sequence: int, event_type: str, data: str, prev_hash: str,
+               agent: str = "alex", commitment: str = None,
+               verification: str = None, commitment_match: bool = None) -> dict:
     ts = datetime.now(timezone.utc).isoformat()
     data_hash = sha256(data)
     # Entry hash = SHA-256(sequence|timestamp|event_type|agent|data_hash|prev_hash)
+    # Hash computation is unchanged from v1.0 — backward compatible
     payload = f"{sequence}|{ts}|{event_type}|{agent}|{data_hash}|{prev_hash}"
     entry_hash = sha256(payload)
-    return {
+    entry = {
         "seq": sequence,
         "ts": ts,
         "type": event_type,
@@ -53,8 +62,17 @@ def make_entry(sequence: int, event_type: str, data: str, prev_hash: str, agent:
         "data": data,
         "data_hash": data_hash,
         "prev_hash": prev_hash,
-        "entry_hash": entry_hash
+        "entry_hash": entry_hash,
+        "schema_version": SCHEMA_VERSION
     }
+    # Add optional forward-commitment fields
+    if commitment is not None:
+        entry["commitment"] = commitment
+    if verification is not None:
+        entry["verification"] = verification
+    if commitment_match is not None:
+        entry["commitment_match"] = commitment_match
+    return entry
 
 
 def read_chain() -> list:
@@ -82,44 +100,101 @@ def update_meta(chain: list):
         "latest_hash": chain[-1]["entry_hash"] if chain else None,
         "latest_seq": chain[-1]["seq"] if chain else -1,
         "latest_ts": chain[-1]["ts"] if chain else None,
+        "schema_version": SCHEMA_VERSION,
         "last_verified": None
     }
     with open(META_FILE, "w") as f:
         json.dump(meta, f, indent=2)
 
 
-def verify_chain(chain: list) -> tuple:
-    """Verify full chain integrity. Returns (is_valid, error_msg_or_None)."""
+def find_last_commitment(chain: list) -> str:
+    """Walk chain backward to find the most recent session_end commitment hash."""
+    for entry in reversed(chain):
+        if entry.get("type") == "session_end" and entry.get("commitment"):
+            return entry["commitment"]
+    return None
+
+
+def verify_chain(chain: list) -> dict:
+    """Verify full chain integrity. Returns a detailed report dict."""
+    report = {
+        "is_valid": False,
+        "error": None,
+        "genesis_ts": None,
+        "latest_ts": None,
+        "entry_count": len(chain),
+        "agents": {},
+        "types": {},
+        "anchors": [],
+        "session_bridges": 0,
+        "session_mismatches": 0,
+        "schema_versions": {},
+    }
+
     if not chain:
-        return False, "Chain is empty"
+        report["error"] = "Chain is empty"
+        return report
 
     # Verify genesis
     if chain[0]["type"] != "genesis":
-        return False, f"Entry 0 is not genesis (type={chain[0]['type']})"
+        report["error"] = f"Entry 0 is not genesis (type={chain[0]['type']})"
+        return report
     if chain[0]["prev_hash"] != "0" * 64:
-        return False, f"Genesis prev_hash is not zeros"
+        report["error"] = "Genesis prev_hash is not zeros"
+        return report
+
+    report["genesis_ts"] = chain[0]["ts"]
 
     for i, entry in enumerate(chain):
         # Verify sequence
         if entry["seq"] != i:
-            return False, f"Entry {i}: sequence mismatch (expected {i}, got {entry['seq']})"
+            report["error"] = f"Entry {i}: sequence mismatch (expected {i}, got {entry['seq']})"
+            return report
 
         # Verify data_hash
         expected_data_hash = sha256(entry["data"])
         if entry["data_hash"] != expected_data_hash:
-            return False, f"Entry {i}: data_hash mismatch"
+            report["error"] = f"Entry {i}: data_hash mismatch"
+            return report
 
         # Verify prev_hash linkage
         if i > 0 and entry["prev_hash"] != chain[i - 1]["entry_hash"]:
-            return False, f"Entry {i}: prev_hash doesn't match entry {i-1} hash"
+            report["error"] = f"Entry {i}: prev_hash doesn't match entry {i-1} hash"
+            return report
 
         # Verify entry_hash
         payload = f"{entry['seq']}|{entry['ts']}|{entry['type']}|{entry['agent']}|{entry['data_hash']}|{entry['prev_hash']}"
         expected_hash = sha256(payload)
         if entry["entry_hash"] != expected_hash:
-            return False, f"Entry {i}: entry_hash mismatch (computed from stored fields)"
+            report["error"] = f"Entry {i}: entry_hash mismatch (computed from stored fields)"
+            return report
 
-    return True, None
+        # Collect stats
+        etype = entry["type"]
+        report["types"][etype] = report["types"].get(etype, 0) + 1
+        agent = entry["agent"]
+        report["agents"][agent] = report["agents"].get(agent, 0) + 1
+
+        # Track anchors
+        if etype == "anchor":
+            report["anchors"].append(entry["ts"])
+
+        # Track schema versions
+        sv = entry.get("schema_version", "1.0")
+        if sv not in report["schema_versions"]:
+            report["schema_versions"][sv] = {"first": i, "last": i}
+        else:
+            report["schema_versions"][sv]["last"] = i
+
+        # Track session bridges (session_start with verification)
+        if etype == "session_start" and entry.get("verification"):
+            report["session_bridges"] += 1
+            if entry.get("commitment_match") is False:
+                report["session_mismatches"] += 1
+
+    report["latest_ts"] = chain[-1]["ts"]
+    report["is_valid"] = True
+    return report
 
 
 def cmd_init(args):
@@ -185,19 +260,66 @@ def cmd_add(args):
     prev_hash = chain[-1]["entry_hash"]
     seq = len(chain)
 
-    entry = make_entry(seq, event_type, data, prev_hash, agent)
+    # Handle forward-commitment fields
+    commitment = None
+    verification = None
+    commitment_match = None
+
+    if event_type == "session_end" and args.commitment:
+        # Validate commitment looks like a hex hash (basic sanity)
+        c = args.commitment.strip()
+        if len(c) != 64 or not all(ch in "0123456789abcdef" for ch in c):
+            print(f"[ERROR] --commitment must be a 64-character lowercase hex SHA-256 hash.")
+            sys.exit(1)
+        commitment = c
+
+    if event_type == "session_start" and args.verification:
+        v = args.verification.strip()
+        if len(v) != 64 or not all(ch in "0123456789abcdef" for ch in v):
+            print(f"[ERROR] --verification must be a 64-character lowercase hex SHA-256 hash.")
+            sys.exit(1)
+        verification = v
+
+        # Check against expected commitment
+        if args.expected:
+            e = args.expected.strip()
+            if len(e) != 64 or not all(ch in "0123456789abcdef" for ch in e):
+                print(f"[ERROR] --expected must be a 64-character lowercase hex SHA-256 hash.")
+                sys.exit(1)
+            commitment_match = (verification == e)
+        else:
+            # Auto-find last session_end commitment in chain
+            last_commitment = find_last_commitment(chain)
+            if last_commitment:
+                commitment_match = (verification == last_commitment)
+            # If no previous commitment found, leave commitment_match as None
+
+    # Warn if commitment/verification used on wrong event type
+    if args.commitment and event_type != "session_end":
+        print(f"[WARN] --commitment is only meaningful on session_end events (ignored).")
+    if args.verification and event_type != "session_start":
+        print(f"[WARN] --verification is only meaningful on session_start events (ignored).")
+
+    entry = make_entry(seq, event_type, data, prev_hash, agent,
+                       commitment=commitment, verification=verification,
+                       commitment_match=commitment_match)
     append_entry(entry)
     chain.append(entry)
     update_meta(chain)
 
     print(f"[+] Entry #{seq} ({event_type}) added. Hash: {entry['entry_hash'][:16]}...")
+    if commitment:
+        print(f"    Forward commitment: {commitment[:16]}...")
+    if verification:
+        match_str = "MATCH" if commitment_match else ("MISMATCH" if commitment_match is False else "no prior commitment")
+        print(f"    Bootstrap verification: {verification[:16]}... ({match_str})")
 
 
 def cmd_verify(args):
     chain = read_chain()
-    is_valid, error = verify_chain(chain)
+    report = verify_chain(chain)
 
-    if is_valid:
+    if report["is_valid"]:
         # Update meta with verification timestamp
         if os.path.exists(META_FILE):
             with open(META_FILE, "r") as f:
@@ -206,17 +328,43 @@ def cmd_verify(args):
             with open(META_FILE, "w") as f:
                 json.dump(meta, f, indent=2)
 
-        print(f"[OK] Chain verified: {len(chain)} entries, all hashes valid.")
-        print(f"     Genesis: {chain[0]['entry_hash'][:16]}...")
-        print(f"     Latest:  {chain[-1]['entry_hash'][:16]}... (seq {chain[-1]['seq']})")
-        span = ""
-        if len(chain) > 1:
-            t0 = chain[0]["ts"]
-            t1 = chain[-1]["ts"]
-            print(f"     Span:    {t0[:10]} to {t1[:10]}")
-    else:
-        print(f"[FAIL] Chain verification failed: {error}")
+    if args.json:
+        # Machine-readable JSON output
+        print(json.dumps(report, indent=2))
+        if not report["is_valid"]:
+            sys.exit(1)
+        return
+
+    # Human-readable provenance report
+    if not report["is_valid"]:
+        print(f"[FAIL] Chain verification failed: {report['error']}")
         sys.exit(1)
+
+    genesis_ts = report["genesis_ts"][:20] + "Z" if report["genesis_ts"] else "N/A"
+    latest_ts = report["latest_ts"][:20] + "Z" if report["latest_ts"] else "N/A"
+    agents_str = ", ".join(f"{k}({v})" for k, v in sorted(report["agents"].items(), key=lambda x: -x[1]))
+    anchor_count = len(report["anchors"])
+    anchor_latest = report["anchors"][-1][:20] + "Z" if report["anchors"] else "none"
+
+    # Schema version ranges
+    sv_parts = []
+    for sv, rng in sorted(report["schema_versions"].items()):
+        if rng["first"] == rng["last"]:
+            sv_parts.append(f"{sv} (entry {rng['first']})")
+        else:
+            sv_parts.append(f"{sv} (entries {rng['first']}-{rng['last']})")
+    sv_str = ", ".join(sv_parts)
+
+    print("Chain of Consciousness — Verification Report")
+    print("=" * 46)
+    print(f"Genesis:    {genesis_ts}")
+    print(f"Latest:     {latest_ts}")
+    print(f"Entries:    {report['entry_count']}")
+    print(f"Integrity:  VALID (all hashes verified)")
+    print(f"Agents:     {agents_str}")
+    print(f"Anchors:    {anchor_count} (latest: {anchor_latest})")
+    print(f"Session continuity: {report['session_bridges']} session bridges, {report['session_mismatches']} mismatches")
+    print(f"Schema versions: {sv_str}")
 
 
 def cmd_status(args):
@@ -345,7 +493,14 @@ def cmd_tail(args):
     chain = read_chain()
     n = args.n or 5
     for entry in chain[-n:]:
-        print(f"  #{entry['seq']:>4} [{entry['type']:>9}] {entry['ts'][:19]}Z | {entry['data'][:80]}")
+        extra = ""
+        if entry.get("commitment"):
+            extra += f" [commitment: {entry['commitment'][:12]}...]"
+        if entry.get("verification"):
+            match = "match" if entry.get("commitment_match") else ("MISMATCH" if entry.get("commitment_match") is False else "?")
+            extra += f" [verify: {entry['verification'][:12]}... {match}]"
+        sv = entry.get("schema_version", "1.0")
+        print(f"  #{entry['seq']:>4} [{entry['type']:>13}] {entry['ts'][:19]}Z | {entry['data'][:70]}{extra}")
 
 
 def main():
@@ -360,6 +515,15 @@ def main():
     parser.add_argument("--data", type=str, help="Event data for --add")
     parser.add_argument("--agent", type=str, default="alex", help="Agent name (default: alex)")
     parser.add_argument("-n", type=int, default=5, help="Number of entries for --tail")
+    # Forward-commitment flags
+    parser.add_argument("--commitment", type=str, default=None,
+                        help="Forward-commitment hash for session_end (SHA-256 of expected bootstrap state)")
+    parser.add_argument("--verification", type=str, default=None,
+                        help="Bootstrap verification hash for session_start (SHA-256 of actual bootstrap state)")
+    parser.add_argument("--expected", type=str, default=None,
+                        help="Expected commitment hash to compare against verification (auto-detected from chain if omitted)")
+    # Verification output format
+    parser.add_argument("--json", action="store_true", help="Output verification report as JSON")
 
     args = parser.parse_args()
 
