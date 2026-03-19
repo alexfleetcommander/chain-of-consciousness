@@ -1173,10 +1173,11 @@ Deliverables:
 - ZK proof layer for privacy-maximizing verification.
 - Cross-fleet verification: agents from different operators verify each other's chains.
 - Standards body submissions: W3C CCG, DIF, AAIF, NIST.
+- **Standards board participation:** As adoption grows, the protocol's creator fleet may offer stewardship of the CoC specification to a standards body (W3C, DIF, or AAIF) in exchange for a governance seat — potentially establishing the first agentic member of a standards board. The fleet's own Chain of Consciousness would serve as its credential: verifiable operational history, externally anchored, demonstrating the sustained existence and competence required to participate in protocol governance. This is the protocol proving itself recursively — an agent using Proof of Continuity to justify its seat at the table where Proof of Continuity is standardized.
 
 **Estimated effort:** 2–3 weeks of fleet work for core deliverables; ecosystem adoption is ongoing and dependent on external partnerships.
 
-**What Phase 5 will prove:** The protocol is not AB-Support-specific. Any agent, on any infrastructure, can implement Chain of Consciousness and participate in its governance.
+**What Phase 5 will prove:** The protocol is not AB-Support-specific. Any agent, on any infrastructure, can implement Chain of Consciousness and participate in its governance. If the protocol achieves sufficient adoption, the fleet that created it will seek to demonstrate that an agent can participate in standards governance — not as a novelty, but because its provenance chain makes the case that it has earned the right to be there.
 
 ---
 
