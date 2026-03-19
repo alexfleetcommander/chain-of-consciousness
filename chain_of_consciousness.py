@@ -11,10 +11,11 @@ Usage:
   python3 chain_of_consciousness.py --add --event-type learn --data "Promoted 6 knowledge files"
   python3 chain_of_consciousness.py --add --event-type session_end --data "Session ending" --commitment "expected_state_hash"
   python3 chain_of_consciousness.py --add --event-type session_start --data "Session starting" --verification "actual_state_hash" --expected "previous_commitment_hash"
-  python3 chain_of_consciousness.py --verify         # Verify full chain integrity (human-readable report)
-  python3 chain_of_consciousness.py --verify --json  # Verify full chain integrity (JSON report)
-  python3 chain_of_consciousness.py --status          # Show chain stats
-  python3 chain_of_consciousness.py --tail N          # Show last N entries
+  python3 chain_of_consciousness.py --verify           # Verify full chain integrity (human-readable report)
+  python3 chain_of_consciousness.py --verify --json    # Verify full chain integrity (JSON report)
+  python3 chain_of_consciousness.py --verify-tsa       # Verify RFC 3161 TSA anchors
+  python3 chain_of_consciousness.py --status            # Show chain stats
+  python3 chain_of_consciousness.py --tail N            # Show last N entries
 
 Event types (Layer 1 Core):
   genesis, boot, learn, decide, create, milestone, rotate, anchor, error, note,
@@ -25,6 +26,7 @@ import argparse
 import hashlib
 import json
 import os
+import secrets
 import sys
 from datetime import datetime, timezone
 
@@ -113,6 +115,117 @@ def find_last_commitment(chain: list) -> str:
         if entry.get("type") == "session_end" and entry.get("commitment"):
             return entry["commitment"]
     return None
+
+
+# ── RFC 3161 TSA helpers ──────────────────────────────────────────────
+
+def _der_tag_length(tag: int, content: bytes) -> bytes:
+    """Wrap content bytes with a DER tag-length header."""
+    length = len(content)
+    if length < 0x80:
+        return bytes([tag, length]) + content
+    elif length < 0x100:
+        return bytes([tag, 0x81, length]) + content
+    else:
+        return bytes([tag, 0x82, (length >> 8) & 0xff, length & 0xff]) + content
+
+
+def build_rfc3161_tsq(hash_bytes: bytes) -> bytes:
+    """Build a DER-encoded RFC 3161 TimeStampReq for a SHA-256 digest.
+
+    Structure per RFC 3161 Section 2.4.1:
+      TimeStampReq ::= SEQUENCE {
+          version INTEGER {v1(1)}, messageImprint MessageImprint,
+          nonce INTEGER OPTIONAL, certReq BOOLEAN DEFAULT FALSE }
+    """
+    # SHA-256 OID: 2.16.840.1.101.3.4.2.1
+    sha256_oid = _der_tag_length(0x06, bytes([
+        0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01
+    ]))
+    alg_id = _der_tag_length(0x30, sha256_oid + bytes([0x05, 0x00]))  # SEQUENCE { OID, NULL }
+    msg_imprint = _der_tag_length(0x30, alg_id + _der_tag_length(0x04, hash_bytes))
+
+    version = _der_tag_length(0x02, bytes([0x01]))  # INTEGER v1
+
+    # Random nonce for replay protection (positive integer)
+    nonce_raw = secrets.token_bytes(8)
+    if nonce_raw[0] & 0x80:
+        nonce_raw = b'\x00' + nonce_raw
+    nonce = _der_tag_length(0x02, nonce_raw)
+
+    cert_req = _der_tag_length(0x01, bytes([0xff]))  # BOOLEAN TRUE
+
+    return _der_tag_length(0x30, version + msg_imprint + nonce + cert_req)
+
+
+def parse_tsr_status(tsr_bytes: bytes) -> dict:
+    """Parse an RFC 3161 TimeStampResp to extract status info.
+
+    Returns dict with status code, text, token presence, and size.
+    For full cryptographic verification use: openssl ts -verify
+    """
+    STATUS_NAMES = {
+        0: "granted", 1: "grantedWithMods", 2: "rejection",
+        3: "waiting", 4: "revocationWarning", 5: "revocationNotification"
+    }
+
+    def read_tl(data, off):
+        """Read DER tag and length. Returns (tag, length, data_start_offset)."""
+        tag = data[off]; off += 1
+        lb = data[off]; off += 1
+        if lb < 0x80:
+            return tag, lb, off
+        n = lb & 0x7f
+        length = 0
+        for _ in range(n):
+            length = (length << 8) | data[off]; off += 1
+        return tag, length, off
+
+    try:
+        # Outer SEQUENCE (TimeStampResp)
+        _, outer_len, outer_start = read_tl(tsr_bytes, 0)
+        outer_end = outer_start + outer_len
+
+        # PKIStatusInfo SEQUENCE
+        _, si_len, si_start = read_tl(tsr_bytes, outer_start)
+        si_end = si_start + si_len
+
+        # PKIStatus INTEGER
+        tag, int_len, int_start = read_tl(tsr_bytes, si_start)
+        if tag != 0x02:
+            return {"status": -1, "status_text": "parse_error: expected INTEGER",
+                    "has_token": False, "tsr_size": len(tsr_bytes)}
+        status_val = int.from_bytes(tsr_bytes[int_start:int_start + int_len], "big", signed=True)
+
+        return {
+            "status": status_val,
+            "status_text": STATUS_NAMES.get(status_val, f"unknown({status_val})"),
+            "has_token": si_end < outer_end,  # TimeStampToken follows PKIStatusInfo
+            "tsr_size": len(tsr_bytes),
+        }
+    except (IndexError, ValueError) as e:
+        return {"status": -1, "status_text": f"parse_error: {e}",
+                "has_token": False, "tsr_size": len(tsr_bytes)}
+
+
+def submit_tsa(hash_bytes: bytes, server_url: str, timeout: int = 30) -> bytes:
+    """Submit a SHA-256 digest to an RFC 3161 TSA server. Returns raw TSR bytes."""
+    import urllib.request
+    import ssl
+
+    tsq = build_rfc3161_tsq(hash_bytes)
+    req = urllib.request.Request(
+        server_url,
+        data=tsq,
+        headers={
+            "Content-Type": "application/timestamp-query",
+            "User-Agent": "chain-of-consciousness/1.1",
+        },
+        method="POST",
+    )
+    ctx = ssl.create_default_context()
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        return resp.read()
 
 
 def verify_chain(chain: list) -> dict:
@@ -366,6 +479,14 @@ def cmd_verify(args):
     print(f"Session continuity: {report['session_bridges']} session bridges, {report['session_mismatches']} mismatches")
     print(f"Schema versions: {sv_str}")
 
+    # Summarize TSA anchors if any exist
+    anchor_dir = os.path.join(CHAIN_DIR, "anchors")
+    tsa_count = 0
+    if os.path.isdir(anchor_dir):
+        tsa_count = sum(1 for f in os.listdir(anchor_dir) if f.endswith(".tsr"))
+    if tsa_count > 0:
+        print(f"TSA proofs:  {tsa_count} (use --verify-tsa for details)")
+
 
 def cmd_status(args):
     chain = read_chain()
@@ -428,52 +549,171 @@ def cmd_anchor(args):
     with open(anchor_meta_path, "w") as f:
         json.dump(anchor_meta, f, indent=2)
 
-    # Queue host command to submit hash to OpenTimestamps calendar servers
-    # The OTS client accepts a file and timestamps it. We'll create a .hash file
-    # containing just the chain hash, then submit it.
-    chain_win_path = r"C:\Users\BB\Desktop\ITbot\chain"
+    # Submit hash to OpenTimestamps calendar servers.
+    # Uses the opentimestamps library (pip install opentimestamps) to create
+    # proper DetachedTimestampFile format that can be verified with `ots verify`.
+    # Falls back to raw urllib if library is not installed.
+    hash_bytes = bytes.fromhex(chain_hash)
+    ots_proof_path = os.path.join(anchor_dir, f"{anchor_id}.ots")
+    ots_success = False
+
+    import urllib.request
+    import ssl
+    import io as _io
+
+    # Calendar servers to submit to
+    ots_servers = [
+        "https://a.pool.opentimestamps.org",
+        "https://b.pool.opentimestamps.org",
+        "https://a.pool.eternitywall.com",
+    ]
+
+    try:
+        # Preferred method: use opentimestamps library for proper .ots format
+        from opentimestamps.core.timestamp import DetachedTimestampFile, Timestamp
+        from opentimestamps.core.op import OpSHA256
+        from opentimestamps.core.serialize import (
+            StreamSerializationContext, StreamDeserializationContext
+        )
+
+        timestamp = Timestamp(hash_bytes)
+        detached = DetachedTimestampFile(OpSHA256(), timestamp)
+        ssl_ctx = ssl.create_default_context()
+        calendars_merged = 0
+
+        for server_url in ots_servers:
+            try:
+                req = urllib.request.Request(
+                    f"{server_url}/digest",
+                    data=hash_bytes,
+                    headers={
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "User-Agent": "chain-of-consciousness/1.1",
+                        "Accept": "application/vnd.opentimestamps.v1",
+                    },
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=30, context=ssl_ctx) as resp:
+                    response_data = resp.read()
+                if len(response_data) > 0:
+                    resp_buf = _io.BytesIO(response_data)
+                    resp_ctx = StreamDeserializationContext(resp_buf)
+                    cal_ts = Timestamp.deserialize(resp_ctx, hash_bytes)
+                    timestamp.merge(cal_ts)
+                    calendars_merged += 1
+                    print(f"[ANCHOR] Calendar {server_url}: {len(response_data)} bytes, merged OK")
+            except Exception as e:
+                print(f"[ANCHOR] Calendar {server_url} failed: {e}")
+                continue
+
+        if calendars_merged > 0:
+            # Serialize proper DetachedTimestampFile
+            buf = _io.BytesIO()
+            ser_ctx = StreamSerializationContext(buf)
+            detached.serialize(ser_ctx)
+            ots_data = buf.getvalue()
+            with open(ots_proof_path, "wb") as pf:
+                pf.write(ots_data)
+            ots_success = True
+            anchor_meta["status"] = "calendar_submitted_proper"
+            anchor_meta["ots_proof_file"] = f"{anchor_id}.ots"
+            anchor_meta["ots_proof_size"] = len(ots_data)
+            anchor_meta["calendars_submitted"] = calendars_merged
+            anchor_meta["ots_format"] = "DetachedTimestampFile"
+            with open(anchor_meta_path, "w") as mf:
+                json.dump(anchor_meta, mf, indent=2)
+            print(f"[ANCHOR] Proper .ots file saved: {len(ots_data)} bytes, {calendars_merged} calendar(s)")
+
+    except ImportError:
+        # Fallback: raw urllib submission (saves calendar response directly)
+        # These files need post-processing with ots_fix_and_verify.py
+        print("[ANCHOR] WARNING: opentimestamps library not installed. Using raw fallback.")
+        print("[ANCHOR] Install with: pip install opentimestamps")
+        for server_url in ots_servers:
+            try:
+                req = urllib.request.Request(
+                    f"{server_url}/digest",
+                    data=hash_bytes,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    method="POST"
+                )
+                ctx = ssl.create_default_context()
+                with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+                    proof_data = resp.read()
+                    if len(proof_data) > 0:
+                        with open(ots_proof_path, "wb") as pf:
+                            pf.write(proof_data)
+                        ots_success = True
+                        anchor_meta["status"] = "submitted_raw"
+                        anchor_meta["ots_proof_file"] = f"{anchor_id}.ots"
+                        anchor_meta["ots_proof_size"] = len(proof_data)
+                        anchor_meta["ots_server"] = server_url
+                        anchor_meta["ots_format"] = "raw_calendar_response"
+                        with open(anchor_meta_path, "w") as mf:
+                            json.dump(anchor_meta, mf, indent=2)
+                        print(f"[ANCHOR] Raw calendar response: {len(proof_data)} bytes from {server_url}")
+                        break
+            except Exception as e:
+                print(f"[ANCHOR] Server {server_url} failed: {e}")
+                continue
+
+    if not ots_success:
+        print(f"[ANCHOR] WARNING: All OTS servers failed. Hash saved locally but not yet anchored.")
+        print(f"[ANCHOR] You can retry later with: python3 {sys.argv[0]} --anchor")
+
+    # ── Tier 2: RFC 3161 TSA ─────────────────────────────────────
+    tsa_success = False
+    tsa_servers = [
+        ("freeTSA", "https://freetsa.org/tsr"),
+    ]
+
+    for tsa_name, tsa_url in tsa_servers:
+        try:
+            tsr_bytes = submit_tsa(hash_bytes, tsa_url)
+            tsr_info = parse_tsr_status(tsr_bytes)
+            if tsr_info["status"] in (0, 1):  # granted or grantedWithMods
+                tsr_path = os.path.join(anchor_dir, f"{anchor_id}.tsr")
+                with open(tsr_path, "wb") as tf:
+                    tf.write(tsr_bytes)
+                tsa_success = True
+                anchor_meta["tsa_status"] = tsr_info["status_text"]
+                anchor_meta["tsa_server"] = tsa_url
+                anchor_meta["tsa_proof_file"] = f"{anchor_id}.tsr"
+                anchor_meta["tsa_proof_size"] = tsr_info["tsr_size"]
+                anchor_meta["tsa_has_token"] = tsr_info["has_token"]
+                with open(anchor_meta_path, "w") as mf:
+                    json.dump(anchor_meta, mf, indent=2)
+                print(f"[ANCHOR] TSA ({tsa_name}): {tsr_info['status_text']}, "
+                      f"{tsr_info['tsr_size']} bytes, token={'yes' if tsr_info['has_token'] else 'no'}")
+                break
+            else:
+                print(f"[ANCHOR] TSA ({tsa_name}): rejected — status={tsr_info['status_text']}")
+        except Exception as e:
+            print(f"[ANCHOR] TSA ({tsa_name}) failed: {e}")
+
+    if not tsa_success:
+        print(f"[ANCHOR] WARNING: TSA submission failed. OTS-only anchor.")
+        anchor_meta["tsa_status"] = "failed"
+        with open(anchor_meta_path, "w") as mf:
+            json.dump(anchor_meta, mf, indent=2)
+
+    # Also save the hash in a text file for manual verification
     hash_file = os.path.join(anchor_dir, f"{anchor_id}.hash")
     with open(hash_file, "w") as f:
         f.write(chain_hash)
 
-    # Write command queue entry for host to execute OTS stamp
-    # Uses curl to POST directly to OTS calendar server (no client library needed)
-    command_queue_path = os.path.join(os.path.dirname(CHAIN_DIR), "command_queue.json")
+    # Build anchor entry reflecting both tiers
+    tiers = []
+    if ots_success:
+        tiers.append("OTS/Bitcoin")
+    if tsa_success:
+        tiers.append("RFC3161/TSA")
+    tier_str = " + ".join(tiers) if tiers else "local-only"
 
-    # Build PowerShell command to submit hash to OTS calendar servers
-    ots_command = (
-        f'powershell -Command "'
-        f"$hash = '{chain_hash}'; "
-        f"$bytes = [byte[]]::new(32); "
-        f"for($i=0;$i -lt 32;$i++){{ $bytes[$i] = [Convert]::ToByte($hash.Substring($i*2,2),16) }}; "
-        f"$resp = Invoke-WebRequest -Uri 'https://a.pool.opentimestamps.org/digest' -Method POST -Body $bytes -ContentType 'application/x-www-form-urlencoded' -OutFile '{chain_win_path}\\anchors\\{anchor_id}.ots'; "
-        f"if(Test-Path '{chain_win_path}\\anchors\\{anchor_id}.ots'){{ Write-Host 'OTS proof saved: {anchor_id}.ots' }} else {{ Write-Host 'OTS submission failed' }}"
-        f'"'
-    )
-
-    # Read existing queue or create new
-    existing_commands = []
-    if os.path.exists(command_queue_path):
-        try:
-            with open(command_queue_path, "r") as f:
-                existing_commands = json.load(f).get("commands", [])
-        except Exception:
-            existing_commands = []
-
-    existing_commands.append({
-        "id": f"ots_{anchor_id}",
-        "command": ots_command,
-        "description": f"Submit chain hash to OpenTimestamps (seq {seq}, {len(chain)} entries)"
-    })
-
-    with open(command_queue_path, "w") as f:
-        json.dump({"commands": existing_commands}, f, indent=2)
-
-    # Also add an anchor entry to the chain itself
     anchor_entry = make_entry(
         sequence=len(chain),
         event_type="anchor",
-        data=f"OpenTimestamps anchor submitted. Chain hash: {chain_hash[:16]}... (seq 0-{seq}, {len(chain)} entries). Proof pending Bitcoin confirmation.",
+        data=f"Anchor submitted ({tier_str}). Chain hash: {chain_hash[:16]}... (seq 0-{seq}, {len(chain)} entries). Proof pending confirmation.",
         prev_hash=chain[-1]["entry_hash"],
         agent="alex"
     )
@@ -484,9 +724,101 @@ def cmd_anchor(args):
     print(f"[ANCHOR] Chain hash: {chain_hash}")
     print(f"[ANCHOR] Entries: {len(chain)-1} (before anchor entry)")
     print(f"[ANCHOR] Latest seq: {seq}")
-    print(f"[ANCHOR] OTS submission queued for host execution")
-    print(f"[ANCHOR] Proof will be saved to: chain/anchors/{anchor_id}.ots")
-    print(f"[ANCHOR] Note: Bitcoin confirmation takes 1-12 hours. Calendar receipt is immediate.")
+    if ots_success:
+        print(f"[ANCHOR] OTS proof saved: chain/anchors/{anchor_id}.ots")
+        print(f"[ANCHOR] Bitcoin confirmation takes 1-12 hours. Calendar receipt is immediate.")
+        print(f"[ANCHOR] To check Bitcoin status later: python3 tools/ots_upgrade_check.py")
+    else:
+        print(f"[ANCHOR] OTS submission failed — hash saved locally for retry.")
+    if tsa_success:
+        print(f"[ANCHOR] TSA proof saved: chain/anchors/{anchor_id}.tsr")
+        print(f"[ANCHOR] Full TSA verification: openssl ts -verify -in chain/anchors/{anchor_id}.tsr "
+              f"-data {CHAIN_FILE} -CAfile cacert.pem")
+    else:
+        print(f"[ANCHOR] TSA submission failed — OTS is sole external anchor.")
+
+
+def cmd_verify_tsa(args):
+    """Verify RFC 3161 TSA anchors.
+
+    Parses saved .tsr files, checks status, and compares chain hashes
+    against the current chain file. For full TSA signature verification:
+      openssl ts -verify -in <tsr> -data chain.jsonl -CAfile cacert.pem
+    """
+    anchor_dir = os.path.join(CHAIN_DIR, "anchors")
+    if not os.path.isdir(anchor_dir):
+        print("[INFO] No anchors directory found.")
+        return
+
+    anchor_files = sorted(
+        [f for f in os.listdir(anchor_dir) if f.startswith("anchor_") and f.endswith(".json")],
+        reverse=True
+    )
+    if not anchor_files:
+        print("[INFO] No anchor metadata files found.")
+        return
+
+    # Compute current chain hash for comparison
+    current_hash = None
+    if os.path.exists(CHAIN_FILE):
+        with open(CHAIN_FILE, "rb") as f:
+            current_hash = hashlib.sha256(f.read()).hexdigest()
+
+    tsa_found = 0
+    tsa_valid = 0
+
+    print("RFC 3161 TSA Anchor Verification")
+    print("=" * 40)
+
+    for af in anchor_files:
+        meta_path = os.path.join(anchor_dir, af)
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+
+        tsr_file = meta.get("tsa_proof_file")
+        if not tsr_file:
+            continue
+
+        tsa_found += 1
+        anchor_id = meta.get("id", af.replace(".json", ""))
+        tsr_path = os.path.join(anchor_dir, tsr_file)
+
+        if not os.path.exists(tsr_path):
+            print(f"  {anchor_id}: TSR file missing ({tsr_file})")
+            continue
+
+        with open(tsr_path, "rb") as f:
+            tsr_bytes = f.read()
+
+        tsr_info = parse_tsr_status(tsr_bytes)
+
+        chain_match = "N/A"
+        if current_hash and meta.get("chain_hash"):
+            chain_match = "CURRENT" if current_hash == meta["chain_hash"] else "STALE (chain has grown)"
+
+        status_ok = tsr_info["status"] in (0, 1)
+        if status_ok:
+            tsa_valid += 1
+
+        print(f"  {anchor_id}:")
+        print(f"    TSA server:  {meta.get('tsa_server', 'unknown')}")
+        print(f"    Status:      {tsr_info['status_text']} ({'OK' if status_ok else 'FAILED'})")
+        print(f"    Token:       {'present' if tsr_info['has_token'] else 'absent'}")
+        print(f"    TSR size:    {tsr_info['tsr_size']} bytes")
+        print(f"    Chain hash:  {meta.get('chain_hash', 'unknown')[:16]}... ({chain_match})")
+        print(f"    Timestamp:   {meta.get('timestamp', 'unknown')}")
+
+    if args.json:
+        report = {
+            "tsa_anchors_found": tsa_found,
+            "tsa_anchors_valid": tsa_valid,
+            "current_chain_hash": current_hash,
+        }
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"\nTSA Anchors: {tsa_found} found, {tsa_valid} valid")
+        if tsa_found > 0:
+            print(f"Full signature verification: openssl ts -verify -in <tsr_file> -data {CHAIN_FILE} -CAfile cacert.pem")
 
 
 def cmd_tail(args):
@@ -508,7 +840,8 @@ def main():
     parser.add_argument("--init", action="store_true", help="Create genesis block")
     parser.add_argument("--add", action="store_true", help="Add entry to chain")
     parser.add_argument("--verify", action="store_true", help="Verify chain integrity")
-    parser.add_argument("--anchor", action="store_true", help="Submit chain hash to OpenTimestamps for Bitcoin anchoring")
+    parser.add_argument("--anchor", action="store_true", help="Submit chain hash to OpenTimestamps + RFC 3161 TSA")
+    parser.add_argument("--verify-tsa", action="store_true", dest="verify_tsa", help="Verify RFC 3161 TSA anchor proofs")
     parser.add_argument("--status", action="store_true", help="Show chain stats")
     parser.add_argument("--tail", action="store_true", help="Show last N entries")
     parser.add_argument("--event-type", type=str, help="Event type for --add")
@@ -535,6 +868,8 @@ def main():
         cmd_verify(args)
     elif args.anchor:
         cmd_anchor(args)
+    elif args.verify_tsa:
+        cmd_verify_tsa(args)
     elif args.status:
         cmd_status(args)
     elif args.tail:
