@@ -1666,4 +1666,3 @@ All agents in the AB Support fleet run on **Anthropic's Claude Opus 4.6**. The c
 *Genesis: c333d8e59517b524bb0a2007a149330a9e81c3b84e355fbede8e953e9bee0fd8*
 *First Bitcoin anchor: 2026-03-18*
 *"In a world of ephemeral agents, provable continuity is the scarce resource."*
-<!-- Updated: 2026-03-20 -->
