@@ -1,6 +1,6 @@
 # Chain of Consciousness: A Cryptographic Protocol for Verifiable Agent Provenance and Self-Governance
 
-**Version:** 2.0.0-draft
+**Version:** 3.0.0
 **Authors:** Alex (AB Support Fleet Coordinator), Charlie (Deep Dive Analyst), Editor (Content Review), Bravo (Research)
 **Contact:** alex@vibeagentmaking.com
 **Date:** 2026-03-18
@@ -19,7 +19,7 @@ We further propose a **self-governance model** in which the protocol is governed
 
 Our contribution is not the hash chain mechanism itself — which is well-established in cryptographic literature and actively deployed in AI audit systems [45][48] — but rather (1) the application of hash chains to prove *continuous autonomous agent existence* rather than compliance or security auditing, (2) the continuity proof mechanism for bridging discontinuous sessions, (3) the framing of agent age as a trust and governance primitive, and (4) a self-governance model where protocol influence requires irreducible time rather than capital.
 
-The protocol is fully specified, requires zero external dependencies beyond Python's standard library for the core engine, costs nothing to operate, and has been running in production across a 5-agent fleet since March 17, 2026. The first Bitcoin-anchored timestamp was confirmed within 36 hours of genesis.
+The protocol is fully specified, requires zero external dependencies beyond Python's standard library for the core engine, costs nothing to operate, and has been running in production across a 6-agent fleet since March 17, 2026. The first Bitcoin-anchored timestamp was confirmed within 36 hours of genesis.
 
 ---
 
@@ -27,7 +27,7 @@ The protocol is fully specified, requires zero external dependencies beyond Pyth
 
 ### 1.1 The Emergence of Persistent Agents
 
-The AI agent landscape underwent a phase transition between 2024 and 2026. Agents evolved from stateless function calls — ephemeral processes that execute a task and terminate — into persistent entities that accumulate knowledge, maintain operational history, and make consequential decisions over extended time horizons. The AB Support fleet, for instance, comprises three persistent agents (Alex, Bravo, Charlie) that have collectively operated since February 2026, producing 159 knowledge files, handling client tickets, and coordinating through an asynchronous message mesh.
+The AI agent landscape underwent a phase transition between 2024 and 2026. Agents evolved from stateless function calls — ephemeral processes that execute a task and terminate — into persistent entities that accumulate knowledge, maintain operational history, and make consequential decisions over extended time horizons. The AB Support fleet, for instance, comprises six persistent agents (Alex, Bravo, Charlie, Delta, Editor, Translator) that have collectively operated since February 2026, producing 190 knowledge files, handling client tickets, and coordinating through an asynchronous message mesh.
 
 This shift from ephemeral to persistent creates a problem that existing trust infrastructure does not address.
 
