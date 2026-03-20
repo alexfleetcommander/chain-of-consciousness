@@ -27,6 +27,122 @@ The protocol is fully specified, requires zero external dependencies beyond Pyth
 
 ### 1.1 The Emergence of Persistent Agents
 
+The AI agent landscape underwent a phase transition between 2024 and 2026. Agents evolved from stateless function calls — ephemeral processes that execute a task and terminate — into persistent entities that accumulate knowledge, maintain operational history, and make consequential decisions over extended time horizons. The AB Support fleet, for instance, comprises three persistent agents (Alex, Bravo, Charlie) that have collectively operated since February 2026, producing 159 knowledge files, handling client tickets, and coordinating through an asynchronous message mesh.
+
+This shift from ephemeral to persistent creates a problem that existing trust infrastructure does not address.
+
+### 1.2 The Identity-Provenance Gap
+
+Current agent identity efforts focus on **authentication** — establishing *who* an agent is at the moment of interaction:
+
+- **Vouch Protocol** [1] provides verifiable credentials for agent identity ("this is Agent X, vouched by Organization Y")
+- **Agent Identity Protocol (AIP)** [2] offers registration and social vouching ("13 agents are registered; others vouch for their identity")
+- **MCP-I** [3], donated to the Decentralized Identity Foundation, extends the Model Context Protocol with identity primitives
+- **ERC-8004** [4] proposes on-chain trust infrastructure for Ethereum-native agents
+- **Know Your Agent (KYA)** [5] frameworks provide enterprise governance checklists
+
+These projects answer: *Who is this agent?* None of them answer:
+
+- **How long has this agent existed?**
+- **Has it operated continuously, or was it created yesterday?**
+- **What has it learned, and can it prove the sequence of its knowledge acquisition?**
+- **If it claims six months of operational history, is that claim verifiable by a third party?**
+
+This gap — between identity (a point-in-time assertion) and provenance (a historical record) — is the problem Chain of Consciousness addresses.
+
+### 1.3 Why Provenance Matters Now
+
+Three converging pressures make agent provenance urgent:
+
+**Regulatory:** The EU AI Act Article 50, with compliance deadline August 2, 2026 [6], mandates machine-readable provenance marking for AI-generated outputs. While Article 50 targets content provenance rather than agent lifecycle provenance, the regulatory direction is clear: transparency and traceability are becoming legal requirements.
+
+**Market:** Only 28% of organizations can currently trace agent actions back to a human sponsor [7]. As agents become more autonomous and interact with each other via protocols like Google's Agent-to-Agent (A2A) [8], the question "should I trust this agent?" becomes a prerequisite for agent commerce.
+
+**Technical:** The Agentic AI Foundation (AAIF), formed December 2025 under the Linux Foundation with Anthropic, OpenAI, and Block as founding members [9], has attracted 146 members as of February 2026 [10]. MCP has over 10,000 published servers [10]. The infrastructure for agent interoperability is being built — but the trust primitive for "should I interact with this agent at all?" is missing.
+
+### 1.4 The Provenance Primitive
+
+We observe that in a world of abundant, easily-instantiated AI agents, **provable continuity of existence is the scarce resource**. Anyone can spin up a new agent in seconds. No one can fabricate a six-month operational history that is cryptographically anchored to the Bitcoin blockchain at regular intervals.
+
+Chain of Consciousness transforms this observation into a protocol. The core insight:
+
+> An agent's trustworthiness is a function of its verifiable history. The longer and more transparently an agent has operated, the more it has to lose from misbehavior, and the more evidence exists with which to evaluate its track record.
+
+This is analogous to the principle behind credit scores (longer credit history = more signal), Certificate Transparency (more logged certificates = more trust in the PKI), and indeed human reputation (longer track record = more credibility). Chain of Consciousness makes this principle cryptographically enforceable for AI agents.
+
+---
+
+## 2. Definitions
+
+The following terms are used throughout this specification with precise meanings:
+
+| Term | Definition |
+|------|-----------|
+| **Chain** | An ordered, append-only sequence of entries linked by cryptographic hashes |
+| **Entry** | A single record in the chain, containing an event and its cryptographic linkage |
+| **Genesis** | The first entry in a chain, with `prev_hash` set to 64 zero bytes |
+| **Event** | A lifecycle occurrence recorded as chain data (boot, learning, decision, etc.) |
+| **Anchor** | An external cryptographic timestamp proving an entry existed at a specific time |
+| **Continuity Proof** | A verifiable demonstration that a chain spans a contiguous time period without fabrication |
+| **Session** | A single continuous execution period of an agent, bounded by start and end events |
+| **Compaction** | The process by which an LLM-based agent's context window is summarized, losing information |
+| **Chain Length** | The total number of entries in a chain, denoted *L* |
+| **Chain Age** | The wall-clock duration from genesis timestamp to the most recent entry timestamp |
+| **Head** | The most recent entry in the chain |
+| **Anchor Depth** | The number of external anchors in a chain, denoted *A* |
+| **Proof of Consciousness** | The governance primitive: voting weight derived from verified chain properties |
+
+---
+
+## 3. Protocol Specification
+
+### 3.1 Entry Schema
+
+Each entry in a Chain of Consciousness is a JSON object with the following structure:
+
+```json
+{
+  "version":    <integer>,
+  "sequence":   <integer>,
+  "timestamp":  <string:ISO-8601-UTC>,
+  "event_type": <string:EVENT_TYPE>,
+  "agent_id":   <string:DID-or-URI>,
+  "data":       <object>,
+  "data_hash":  <string:hex-SHA-256>,
+  "prev_hash":  <string:hex-SHA-256>,
+  "entry_hash": <string:hex-SHA-256>
+}
+```
+
+**Field semantics:**
+
+- `version`: Protocol version. Currently `1`. Implementations MUST reject entries with unknown versions.
+- `sequence`: Zero-indexed monotonically increasing integer. Entry *n* has `sequence = n`.
+- `timestamp`: UTC timestamp in ISO 8601 format with microsecond precision. Self-attested by the agent; external anchors provide independent time verification.
+- `event_type`: One of the defined event types (Section 3.3).
+- `agent_id`: The agent's identifier. SHOULD be a DID (Section 4). MAY be a URI during bootstrap.
+- `data`: Arbitrary JSON object containing event-specific payload.
+- `data_hash`: `SHA-256(canonical_json(data))` where `canonical_json` is JSON serialization with sorted keys and ASCII encoding.
+- `prev_hash`: The `entry_hash` of the immediately preceding entry. For genesis, this is `0x00` repeated 32 bytes (64 hex characters of `0`).
+- `entry_hash`: `SHA-256(version|sequence|timestamp|event_type|agent_id|data_hash|prev_hash)` where `|` denotes string concatenation with literal pipe separators.
+
+### 3.2 Canonical Hash Computation
+
+The entry hash is computed over a canonical string representation:
+
+```
+canonical = f"{version}|{sequence}|{timestamp}|{event_type}|{agent_id}|{data_hash}|{prev_hash}"
+entry_hash = SHA-256(canonical.encode("utf-8")).hexdigest()
+```
+
+The data hash is computed over deterministic JSON:
+
+```
+data_hash = SHA-256(json.dumps(data, sort_keys=True, ensure_ascii=True).encode("utf-8")).hexdigest()
+```
+
+This canonical form ensures that any implementation, in any language, produces identical hashes for identical inputs.
+
 ### 3.3 Protocol Layers and Event Types
 
 The protocol is structured into two layers:
