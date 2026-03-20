@@ -38,3 +38,4 @@ Replace `tools/chain_of_consciousness.py` with the upgraded version from this di
 python test_upgrade.py
 ```
 Runs 30 tests covering backward compatibility, new event types, forward-commitment, schema versioning, verification reports, input validation, and hash computation stability.
+
