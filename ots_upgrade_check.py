@@ -38,11 +38,15 @@ def try_upgrade(detached):
     verified = False
     block_height = None
 
-    for att, msg in list(detached.timestamp.all_attestations()):
+    # FIRST: Check if any attestation path already has a Bitcoin block confirmation
+    # (the file may have been upgraded on a previous run or by the OTS library)
+    for msg, att in list(detached.timestamp.all_attestations()):
         if isinstance(att, BitcoinBlockHeaderAttestation):
-            print(f"    Already verified: block {att.height}")
+            print(f"    CONFIRMED: Bitcoin block {att.height}")
             return True, att.height
 
+    # No existing Bitcoin attestation — try upgrading pending ones from calendars
+    for msg, att in list(detached.timestamp.all_attestations()):
         if isinstance(att, PendingAttestation):
             calendar_url = att.uri
             commitment_hex = msg.hex()
@@ -52,7 +56,6 @@ def try_upgrade(detached):
                 req = urllib.request.Request(upgrade_url,
                     headers={"Accept": "application/vnd.opentimestamps.v1",
                              "User-Agent": "chain-of-consciousness/1.1"})
-                # SHORT timeout — 10 seconds. If calendar doesn't have it, it 404s fast.
                 with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
                     upgrade_data = resp.read()
 
@@ -60,20 +63,19 @@ def try_upgrade(detached):
                     resp_ctx = StreamDeserializationContext(resp_buf)
                     upgrade_ts = Timestamp.deserialize(resp_ctx, msg)
 
-                    for up_att, up_msg in upgrade_ts.all_attestations():
+                    for up_msg, up_att in upgrade_ts.all_attestations():
                         if isinstance(up_att, BitcoinBlockHeaderAttestation):
-                            print(f"    BITCOIN BLOCK {up_att.height}!")
+                            print(f"    UPGRADED: Bitcoin block {up_att.height}!")
                             verified = True
                             block_height = up_att.height
 
             except urllib.error.HTTPError as e:
                 if e.code == 404:
-                    print(f"    {calendar_url}: not yet (404)")
+                    pass  # Not yet included — normal
                 else:
                     print(f"    {calendar_url}: HTTP {e.code}")
             except Exception as e:
                 print(f"    {calendar_url}: {type(e).__name__}: {e}")
-                # Don't let one hung request block everything
                 continue
 
     return verified, block_height
