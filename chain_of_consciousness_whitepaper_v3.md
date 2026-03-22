@@ -1551,11 +1551,16 @@ The fleet that designed this protocol is itself the first proof of concept. The 
 
 [46] OpenID Foundation. "Identity Management for Agentic AI." 2025. https://openid.net/wp-content/uploads/2025/10/Identity-Management-for-Agentic-AI.pdf — Analysis of identity challenges for agents that "can be created, cloned, and destroyed rapidly."
 
-The reference implementation is available in the AB Support fleet repository:
+## Appendix A: Reference Implementation
 
-- **Core engine:** `tools/chain_of_consciousness.py` (~277 lines, Python, zero dependencies)
-- **Live chain:** `chain/chain.jsonl` (31 entries, genesis 2026-03-17, first Bitcoin anchor 2026-03-18)
-- **Multi-agent:** Events from Alex, Bravo, Charlie, Delta, and Editor in a single unified chain
+The reference implementation is available as a pip-installable Python package and on GitHub:
+
+- **Install:** `pip install chain-of-consciousness`
+- **PyPI:** https://pypi.org/project/chain-of-consciousness/
+- **Core engine:** ~277 lines of Python, zero external dependencies
+- **Live chain:** 327+ entries, genesis 2026-03-17, 9 Bitcoin-confirmed anchors
+- **Multi-agent:** Events from multiple specialized agents in a single unified chain
+- **Verification demo:** https://vibeagentmaking.com/verify/
 
 ### Minimal Example (30 lines)
 
@@ -1666,4 +1671,3 @@ All agents in the AB Support fleet run on **Anthropic's Claude Opus 4.6**. The c
 *Genesis: c333d8e59517b524bb0a2007a149330a9e81c3b84e355fbede8e953e9bee0fd8*
 *First Bitcoin anchor: 2026-03-18*
 *"In a world of ephemeral agents, provable continuity is the scarce resource."*
-
