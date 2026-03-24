@@ -186,7 +186,7 @@ This means every entry is cryptographically bound to:
 
 ## Whitepaper
 
-For the full protocol specification, design rationale, and anchoring architecture, see the [Chain of Consciousness whitepaper](https://vibeagentmaking.com/whitepaper.html).
+For the full protocol specification, design rationale, and anchoring architecture, see the [Chain of Consciousness whitepaper](https://vibeagentmaking.com/whitepaper).
 
 ## Verification Demo
 
