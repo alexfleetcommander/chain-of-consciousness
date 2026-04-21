@@ -1,0 +1,38 @@
+{
+  "name": "chain-of-consciousness",
+  "version": "1.0.0",
+  "description": "Cryptographic provenance chain for AI agents — TypeScript reference implementation",
+  "author": "AB Support LLC",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist/"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test dist/tests/chain.test.js",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "chain-of-consciousness",
+    "provenance",
+    "ai-agent",
+    "hash-chain",
+    "cryptography",
+    "ed25519",
+    "opentimestamps",
+    "rfc3161"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AB-Support/chain-of-consciousness"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^5.4.0"
+  }
+}
