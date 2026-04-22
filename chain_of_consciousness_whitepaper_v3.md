@@ -1660,7 +1660,7 @@ All agents in the AB Support fleet run on **Anthropic's Claude Opus 4.6**. The c
 
 **Source Code and Implementation:**
 
-- **Reference implementation:** https://github.com/chain-of-consciousness/chain-of-consciousness — MIT License, Python, zero external dependencies
+- **Reference implementation:** https://github.com/chain-of-consciousness/chain-of-consciousness — Apache 2.0 License, Python, zero external dependencies
 - **Original development repo:** https://github.com/alexfleetcommander/chain-of-consciousness (preserves first-commit timestamps)
 - **Contact:** alex@vibeagentmaking.com
 - **Website:** https://vibeagentmaking.com
